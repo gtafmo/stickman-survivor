@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火柴人无双：割草生存 (最终完美版)</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #05050a; /* 更深邃的背景 */
+            color: #0ff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            text-align: center;
+            overflow: hidden;
+        }
+        h1 { 
+            margin-top: 15px; 
+            margin-bottom: 5px; 
+            font-size: 28px; 
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px #0ff, 0 0 20px #0ff; 
+        }
+        canvas {
+            background-color: #080812;
+            display: block;
+            margin: 0 auto;
+            border: 2px solid #0ff;
+            border-radius: 8px;
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.4), inset 0 0 20px rgba(0, 255, 255, 0.1);
+        }
+        .instructions {
+            margin-top: 15px;
+            font-size: 15px;
+            color: #0ff;
+            background: rgba(0, 255, 255, 0.1);
+            display: inline-block;
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.2);
+        }
+        .key {
+            color: #fff;
+            background: rgba(0, 255, 255, 0.3);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin: 0 3px;
+            box-shadow: 0 0 5px #0ff;
+        }
+        .ai-terminal {
+            width: 860px;
+            margin: 15px auto 0 auto;
+            padding: 12px 20px;
+            background: rgba(0, 15, 25, 0.85);
+            border: 1px solid rgba(0, 255, 255, 0.5);
+            border-left: 5px solid #0ff;
+            border-radius: 4px;
+            color: #0ff;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 15px;
+            text-align: left;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.15);
+            min-height: 20px;
+            text-shadow: 0 0 5px #0ff;
+            position: relative;
+        }
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 15px;
+            background-color: #0ff;
+            animation: blink 1s step-end infinite;
+            vertical-align: middle;
+            margin-left: 2px;
+        }
+        @keyframes blink { 50% { opacity: 0; } }
+    </style>
+</head>
+<body>
+
+    <h1>Neon Stickman: Survivor</h1>
+    <canvas id="gameCanvas" width="900" height="450"></canvas>
+    
+    <div class="ai-terminal" id="aiTerminal">
+        [SYSTEM OVERSEER]: 正在初始化神经连接...<span class="cursor"></span>
+    </div>
+
+    <div class="instructions">
+        移动: <span class="key">A</span><span class="key">D</span> &nbsp;|&nbsp;
+        滑步冲刺(无CD): <span class="key">L</span> &nbsp;|&nbsp;
+        光刃连斩: <span class="key">J</span> &nbsp;|&nbsp;
+        电光突刺: <span class="key">K</span> &nbsp;|&nbsp;
+        等离子风暴: <span class="key">U</span>
+    </div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- 核心变量 ---
+const groundY = 380;
+let keys = {};
+let score = 0;
+let gameOver = false;
+let frameCount = 0;
+let screenShake = 0;
+
+// AI 监视者相关变量
+let lastMilestone = 0;
+let deathMessageRequested = false;
+let typeInterval = null;
+let aiTerminalEl = document.getElementById('aiTerminal');
+
+// 时间控制变量 (锁60帧)
+let lastTime = 0;
+const targetFPS = 60;
+const frameInterval = 1000 / targetFPS;
+
+// --- 实体类 ---
+class Player {
+    constructor() {
+        this.x = canvas.width / 2;
+        this.y = groundY;
+        // 【修改】速度累计提升了超过40%，现在移动非常迅捷灵动
+        this.speed = 5.0; 
+        this.color = '#00ffff'; 
+        this.facingRight = true;
+        this.hp = 200; 
+        this.maxHp = 200;
+        this.state = 'idle'; // idle, walk, attack, dash, ult, evade
+        
+        this.actionTimer = 0;
+        this.cooldowns = { K: 0, U: 0 };
+        
+        this.comboStep = 0;        
+        this.comboWindow = 0;      
+        this.bufferNextAttack = false; 
+        this.hasHit = false;       
+    }
+
+    update() {
+        if (this.hp <= 0) {
+            if (!gameOver) {
+                gameOver = true;
+                if (!deathMessageRequested) {
+                    deathMessageRequested = true;
+                    fetchAIComment("death", score); // 死亡时触发AI评价
+                }
+            }
+            return;
+        }
+
+        if (this.cooldowns.K > 0) this.cooldowns.K--;
+        if (this.cooldowns.U > 0) this.cooldowns.U--;
+
+        if (this.comboWindow > 0) {
+            this.comboWindow--;
+            if (this.comboWindow <= 0) {
+                this.comboStep = 0; 
+            }
+        }
+
+        if (this.state === 'attack') {
+            this.actionTimer--;
+            
+            // 攻击动作判定帧
+            if (this.actionTimer === 10 && !this.hasHit) {
+                // 【修改】攻击基础范围大幅提升20%以上，让武器前端完美匹配伤害盒
+                let reach = 60 + this.comboStep * 18; 
+                let dmg = this.comboStep === 4 ? 3 : 1; 
+                checkMeleeHit(this.x, this.facingRight ? reach : -reach, dmg, this.comboStep);
+                this.hasHit = true;
+                
+                let pColor = this.comboStep === 4 ? '#ff0055' : '#00ffff';
+                let particleCount = 8 + this.comboStep * 4; 
+                for (let i = 0; i < particleCount; i++) {
+                    let px = this.x + (this.facingRight ? Math.random() * reach : -Math.random() * reach);
+                    let py = this.y - 10 - Math.random() * 50;
+                    particles.push(new Particle(px, py, pColor, 6 + this.comboStep));
+                }
+                
+                if (this.comboStep === 4) {
+                    createParticles(this.x + (this.facingRight ? 50 : -50), this.y - 30, '#ffaa00', 15, 8);
+                    screenShake = 10;
+                } else {
+                    screenShake = 3;
+                }
+            }
+
+            if (this.actionTimer <= 0) {
+                this.state = 'idle';
+                this.comboWindow = 25; 
+                
+                if (this.bufferNextAttack) {
+                    this.startAttack(this.comboStep + 1);
+                    this.bufferNextAttack = false;
+                }
+            }
+        } 
+        else if (this.state === 'ult') {
+            this.actionTimer--;
+            if (this.actionTimer % 3 === 0) {
+                createParticles(this.x, this.y - 30, '#00ffff', 5, 12);
+            }
+            if (this.actionTimer <= 0) this.state = 'idle';
+        } else if (this.state === 'dash') {
+            this.x += (this.facingRight ? 12 : -12);
+            this.actionTimer--;
+            
+            checkMeleeHit(this.x, this.facingRight ? 60 : -60, 2, 0);
+            createParticles(this.x, this.y - 30, '#00ffff', 2, 2); // 蓝色电火花
+            
+            if (this.actionTimer % 4 === 0) screenShake = 2;
+            if (this.actionTimer <= 0) this.state = 'idle';
+        } else if (this.state === 'evade') {
+            // 【新增】L键战术滑步冲刺：无伤害，速度快，带白色残影
+            this.x += (this.facingRight ? 16 : -16); 
+            this.actionTimer--;
+            
+            // 产生白色残影粒子拖尾
+            createParticles(this.x, this.y - 30, '#ffffff', 3, 1);
+            
+            if (this.actionTimer <= 0) this.state = 'idle';
+        } else {
+            this.state = 'idle';
+            if (keys['a']) {
+                this.x -= this.speed;
+                this.facingRight = false;
+                this.state = 'walk';
+            }
+            if (keys['d']) {
+                this.x += this.speed;
+                this.facingRight = true;
+                this.state = 'walk';
+            }
+        }
+
+        this.x = Math.max(20, Math.min(canvas.width - 20, this.x));
+    }
+
+    attackInput() {
+        if (this.state === 'dash' || this.state === 'ult' || this.state === 'evade') return; 
+        
+        if (this.state !== 'attack') {
+            if (this.comboWindow > 0 && this.comboStep > 0 && this.comboStep < 4) {
+                this.startAttack(this.comboStep + 1);
+            } else {
+                this.startAttack(1);
+            }
+        } else if (this.state === 'attack' && this.comboStep < 4) {
+            this.bufferNextAttack = true;
+        }
+    }
+
+    startAttack(step) {
+        this.state = 'attack';
+        this.comboStep = step;
+        this.actionTimer = step === 4 ? 24 : 16; 
+        this.comboWindow = 0; 
+        this.hasHit = false;
+
+        let moveDist = step === 4 ? 15 : 6;
+        this.x += this.facingRight ? moveDist : -moveDist;
+    }
+
+    dash() {
+        if (this.state !== 'idle' && this.state !== 'walk') return;
+        if (this.cooldowns.K > 0) return;
+        this.state = 'dash';
+        this.actionTimer = 12;
+        this.cooldowns.K = 240; // 真实4秒冷却
+    }
+    
+    // 【新增】L键滑步，无冷却
+    evade() {
+        if (this.state !== 'idle' && this.state !== 'walk') return;
+        this.state = 'evade';
+        this.actionTimer = 10; // 持续时间短，动作干净利落
+        // 没有冷却代码，实现无限释放
+    }
+
+    ultimate() {
+        if (this.state !== 'idle' && this.state !== 'walk') return;
+        if (this.cooldowns.U > 0) return;
+        this.state = 'ult';
+        this.actionTimer = 35;
+        this.cooldowns.U = 360; // 真实6秒冷却
+        
+        createParticles(this.x, this.y - 40, '#00ffff', 60, 15);
+        screenShake = 25;
+
+        // 大招范围也使用修复后的判定方式
+        [...enemies].forEach(enemy => {
+            if (Math.abs(enemy.x - this.x) < 220) {
+                enemy.takeDamage(8, 4); 
+            }
+        });
+    }
+
+    draw(ctx) {
+        drawStickman(ctx, this.x, this.y, this.color, this.facingRight, this.state, true, false, this.comboStep, this.actionTimer);
+        
+        // 血条
+        ctx.fillStyle = 'rgba(255, 0, 80, 0.5)';
+        ctx.fillRect(this.x - 30, this.y - 100, 60, 4);
+        ctx.fillStyle = '#00ffff';
+        ctx.shadowBlur = 5;
+        ctx.shadowColor = '#00ffff';
+        ctx.fillRect(this.x - 30, this.y - 100, 60 * (Math.max(0, this.hp) / this.maxHp), 4);
+        ctx.shadowBlur = 0; 
+
+        if (this.state === 'attack') {
+            ctx.beginPath();
+            ctx.strokeStyle = this.comboStep === 4 ? '#ff0055' : '#00ffff';
+            ctx.lineWidth = this.comboStep === 4 ? 6 : 3;
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = ctx.strokeStyle;
+            
+            let cx = this.x + (this.facingRight ? 15 : -15);
+            let cy = this.y - 40;
+            // 光刃特效范围也随之增大
+            let radius = 50 + this.comboStep * 12; 
+            let progress = 1 - (this.actionTimer / (this.comboStep === 4 ? 24 : 16));
+
+            if (this.comboStep === 1) { 
+                ctx.arc(cx, cy, radius, (this.facingRight ? -Math.PI/2 : Math.PI*1.5), (this.facingRight ? Math.PI/4 : Math.PI*0.75) * progress, !this.facingRight);
+            } else if (this.comboStep === 2) { 
+                ctx.arc(cx, cy, radius, (this.facingRight ? Math.PI/4 : Math.PI*0.75), (this.facingRight ? -Math.PI/2 : Math.PI*1.5) * progress, this.facingRight);
+            } else if (this.comboStep === 3) { 
+                ctx.moveTo(cx, cy + 10);
+                ctx.lineTo(cx + (this.facingRight ? radius * progress * 1.5 : -radius * progress * 1.5), cy + 10);
+            } else if (this.comboStep === 4) { 
+                ctx.arc(this.x, cy, radius + 20, (this.facingRight ? -Math.PI : 0), (this.facingRight ? 0 : -Math.PI) + (this.facingRight ? Math.PI/2 : -Math.PI/2) * progress, !this.facingRight);
+            }
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+        } else if (this.state === 'ult') {
+            ctx.beginPath();
+            ctx.strokeStyle = `rgba(0, 255, 255, ${this.actionTimer / 35})`;
+            ctx.shadowBlur = 20;
+            ctx.shadowColor = '#00ffff';
+            ctx.lineWidth = 10;
+            ctx.arc(this.x, this.y - 30, 220 - this.actionTimer * 5, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+        }
+    }
+}
+
+class Enemy {
+    constructor(x) {
+        this.x = x;
+        this.y = groundY;
+        this.speed = Math.random() * 0.8 + 0.4; 
+        this.color = '#ff0055'; 
+        this.hp = 2;
+        this.maxHp = 2;
+        this.attackCooldown = 0;
+        this.state = 'walk';
+        this.hitFlashTimer = 0;
+    }
+
+    update() {
+        if (this.hitFlashTimer > 0) this.hitFlashTimer--;
+
+        let dist = player.x - this.x;
+        this.facingRight = dist > 0;
+
+        if (Math.abs(dist) > 35) { 
+            this.x += this.facingRight ? this.speed : -this.speed;
+            this.state = 'walk';
+        } else {
+            this.state = 'idle';
+            if (this.attackCooldown <= 0) {
+                player.hp -= 4; 
+                createParticles(player.x, player.y - 40, '#ff0055', 8, 4);
+                this.attackCooldown = 90; 
+                player.x += this.facingRight ? 3 : -3; 
+                screenShake = 5;
+            }
+        }
+        if (this.attackCooldown > 0) this.attackCooldown--;
+    }
+
+    takeDamage(dmg, hitType = 1) {
+        this.hp -= dmg;
+        this.hitFlashTimer = 4;
+
+        let pColor = hitType === 4 ? '#ffaa00' : '#ff0055';
+        createParticles(this.x, this.y - 40, pColor, hitType === 4 ? 15 : 8, hitType === 4 ? 8 : 5);
+        
+        let knockback = (hitType === 4) ? 40 : 12; 
+        this.x += player.facingRight ? knockback : -knockback;
+
+        if (this.hp <= 0) {
+            score += 10;
+            
+            // 每获得 150 分，触发一次 AI 嘲讽或点评
+            if (score > 0 && score % 150 === 0 && lastMilestone !== score) {
+                lastMilestone = score;
+                fetchAIComment("milestone", score);
+            }
+
+            createParticles(this.x, this.y - 30, '#ff0055', 20, 8);
+            let index = enemies.indexOf(this);
+            if (index > -1) enemies.splice(index, 1);
+        }
+    }
+
+    draw(ctx) {
+        let isFlashing = this.hitFlashTimer > 0;
+        drawStickman(ctx, this.x, this.y, this.color, this.facingRight, this.state, false, isFlashing, 0, 0);
+        
+        if (!isFlashing) { 
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.fillRect(this.x - 15, this.y - 85, 30, 3);
+            ctx.fillStyle = '#ff0055';
+            ctx.fillRect(this.x - 15, this.y - 85, 30 * (this.hp / this.maxHp), 3);
+        }
+    }
+}
+
+class Particle {
+    constructor(x, y, color, speed) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * speed * 2;
+        this.vy = (Math.random() - 0.5) * speed - 2;
+        this.color = color;
+        this.life = 20 + Math.random() * 20;
+        this.maxLife = this.life;
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += 0.2; 
+        this.life--;
+    }
+    draw(ctx) {
+        ctx.fillStyle = this.color;
+        ctx.globalAlpha = Math.max(0, this.life / this.maxLife);
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = this.color;
+        ctx.fillRect(this.x, this.y, 3, 3);
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
+    }
+}
+
+let player = new Player();
+let enemies = [];
+let particles = [];
+
+// 统一绘制骨骼动画
+function drawStickman(ctx, x, y, color, facingRight, state, isPlayer, isHitFlash = false, comboStep = 0, actionTimer = 0) {
+    ctx.strokeStyle = isHitFlash ? '#ffffff' : color;
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    
+    ctx.shadowBlur = isHitFlash ? 20 : 10;
+    ctx.shadowColor = ctx.strokeStyle;
+
+    ctx.beginPath();
+    
+    let headY = y - 60;
+    let bodyTop = y - 45;
+    let bodyBot = y - 20;
+
+    ctx.arc(x, headY, 10, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = isHitFlash ? '#ffffff' : (isPlayer ? '#ffffff' : '#ffaaaa');
+    ctx.fillRect(x + (facingRight ? 4 : -8), headY - 3, 3, 3);
+
+    ctx.beginPath();
+    // 【修改】加入 evade (L键冲刺) 的身体前倾姿态
+    if (state === 'dash' || state === 'evade' || comboStep === 3) {
+        ctx.moveTo(x - (facingRight ? 8 : -8), bodyTop + 8);
+        ctx.lineTo(x, bodyBot);
+        x += (facingRight ? 8 : -8); 
+    } else if (comboStep === 4) {
+        ctx.moveTo(x, bodyTop + 5);
+        ctx.lineTo(x, bodyBot + 5);
+        bodyBot += 5; bodyTop += 5;
+    } else {
+        ctx.moveTo(x, bodyTop);
+        ctx.lineTo(x, bodyBot);
+    }
+
+    let walkOffset = (state === 'walk') ? Math.sin(frameCount * 0.15) * 12 : 0;
+    
+    ctx.moveTo(x, bodyBot);
+    ctx.lineTo(x - 10 + walkOffset, y);
+    ctx.moveTo(x, bodyBot);
+    ctx.lineTo(x + 10 - walkOffset, y);
+
+    ctx.moveTo(x, bodyTop + 5);
+    if (state === 'attack') {
+        let reachX = facingRight ? 25 : -25;
+        if (comboStep === 1) { 
+            ctx.lineTo(x + reachX, bodyTop - 5 + (16-actionTimer)); 
+        } else if (comboStep === 2) { 
+            ctx.lineTo(x + reachX, bodyTop + 15 - (16-actionTimer));
+        } else if (comboStep === 3) { 
+            ctx.lineTo(x + reachX * 1.5, bodyTop + 5);
+        } else if (comboStep === 4) { 
+            ctx.lineTo(x + reachX, bodyTop + 20); 
+            ctx.moveTo(x, bodyTop + 5);
+            ctx.lineTo(x + reachX - (facingRight?5:-5), bodyTop + 15); 
+        }
+    } else if (state === 'ult') {
+        ctx.lineTo(x - 20, bodyTop - 20); 
+        ctx.moveTo(x, bodyTop + 5);
+        ctx.lineTo(x + 20, bodyTop - 20);
+    } else if (state === 'dash' || state === 'evade') { // evade 共用手臂后摆
+        ctx.lineTo(x - (facingRight ? 25 : -25), bodyTop + 10);
+    } else {
+        ctx.lineTo(x - 15 - walkOffset, bodyBot - 5); 
+        ctx.moveTo(x, bodyTop + 5);
+        ctx.lineTo(x + 15 + walkOffset, bodyBot - 5); 
+    }
+
+    ctx.stroke();
+    ctx.shadowBlur = 0; 
+}
+
+// 【修复核心点】计算伤害判定盒子与遍历逻辑
+function checkMeleeHit(originX, reach, damage, comboStep) {
+    let minX = reach > 0 ? originX : originX + reach;
+    let maxX = reach > 0 ? originX + reach : originX;
+    
+    // 【新增】为判定增加 20 像素的边缘补偿，大幅优化擦边未命中的体感
+    minX -= 20;
+    maxX += 20;
+    
+    // 【核心修复】克隆一个数组 [...enemies] 进行遍历。防止遍历时因敌人死亡触发 splice 导致漏掉重叠的敌人。
+    [...enemies].forEach(enemy => {
+        if (enemy.x >= minX && enemy.x <= maxX) {
+            enemy.takeDamage(damage, comboStep);
+        }
+    });
+}
+
+function createParticles(x, y, color, count, speed) {
+    for (let i = 0; i < count; i++) {
+        particles.push(new Particle(x, y, color, speed));
+    }
+}
+
+function spawnEnemy() {
+    let spawnRate = Math.max(80, 200 - Math.floor(score / 15)); 
+    
+    if (frameCount % spawnRate === 0) {
+        let spawnLeft = Math.random() > 0.5;
+        let startX = spawnLeft ? -30 : canvas.width + 30;
+        
+        let e = new Enemy(startX);
+        if (Math.random() < 0.05 + (score/3000)) { 
+            e.maxHp = 6;
+            e.hp = 6;
+            e.color = '#ffaa00'; 
+            e.speed *= 0.7; 
+        }
+        enemies.push(e);
+    }
+}
+
+// --- AI 监视者逻辑 (Gemini API) ---
+async function fetchAIComment(context, currentScore) {
+    const apiKey = ""; // Canvas 环境会自动注入 API 密钥
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+    let prompt = "";
+    if (context === "start") {
+        prompt = "战斗模拟程序刚刚启动。请对即将面临无尽杀戮的蓝色火柴人角斗士说一句简短、冷酷的欢迎语或警告。";
+    } else if (context === "death") {
+        prompt = `蓝色火柴人角斗士已阵亡。它的最终得分为 ${currentScore}。请以“系统监视者”的身份，对它的这场战斗表现进行一句简短的冷嘲热讽或数据化分析。`;
+    } else if (context === "milestone") {
+        prompt = `蓝色火柴人目前已获得 ${currentScore} 分（每杀一个敌人得10分）。请根据这个分数，给出一句简短的赛博朋克风嘲讽或略带惊讶的评价。`;
+    }
+
+    const payload = {
+        contents: [{ parts: [{ text: prompt }] }],
+        systemInstruction: { parts: [{ text: "你是 'SYSTEM OVERSEER' (系统监视者)，一个冷酷、无情的赛博朋克 AI。你正在监视一场霓虹火柴人格斗模拟实验。你的回答必须极其简短（最多1到2句话），语气要高高在上、数据化、且带有一丝讽刺。请使用中文回复。" }] }
+    };
+
+    try {
+        typeWriterEffect("[SYSTEM OVERSEER]: 正在接入神经核心... 分析中...");
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (result.candidates && result.candidates[0].content) {
+            const text = result.candidates[0].content.parts[0].text;
+            typeWriterEffect("[SYSTEM OVERSEER]: " + text);
+        }
+    } catch (e) {
+        console.error(e);
+        typeWriterEffect("[SYSTEM OVERSEER]: 信号丢失，无法连接至母体网络。");
+    }
+}
+
+// 终端打字机特效
+function typeWriterEffect(text) {
+    clearInterval(typeInterval);
+    aiTerminalEl.innerHTML = '<span class="cursor"></span>';
+    let i = 0;
+    typeInterval = setInterval(() => {
+        if (i < text.length) {
+            aiTerminalEl.innerHTML = text.substring(0, i + 1) + '<span class="cursor"></span>';
+            i++;
+        } else {
+            clearInterval(typeInterval);
+        }
+    }, 40); // 打字速度
+}
+
+window.addEventListener('keydown', (e) => {
+    let k = e.key.toLowerCase();
+    keys[k] = true;
+
+    if (!gameOver) {
+        if (k === 'j') player.attackInput(); 
+        if (k === 'k') player.dash();
+        if (k === 'l') player.evade(); // 新增 L 键滑步
+        if (k === 'u') player.ultimate();
+    } else if (k === 'j' || k === 'k' || k === 'l' || k === 'u') {
+        resetGame();
+    }
+});
+
+window.addEventListener('keyup', (e) => {
+    keys[e.key.toLowerCase()] = false;
+});
+
+function resetGame() {
+    player = new Player();
+    enemies = [];
+    particles = [];
+    score = 0;
+    frameCount = 0;
+    gameOver = false;
+    screenShake = 0;
+    lastTime = 0; 
+    
+    lastMilestone = 0;
+    deathMessageRequested = false;
+    fetchAIComment("start", 0); // 重新开始时触发AI宣告
+}
+
+// 首次加载页面时触发一次AI启动宣告
+fetchAIComment("start", 0);
+
+function gameLoop(timestamp) {
+    requestAnimationFrame(gameLoop);
+
+    if (!lastTime) lastTime = timestamp;
+    let deltaTime = timestamp - lastTime;
+
+    // 锁 60 FPS 核心逻辑
+    if (deltaTime < frameInterval) return;
+    lastTime = timestamp - (deltaTime % frameInterval);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (screenShake > 0) {
+        ctx.save(); 
+        let dx = (Math.random() - 0.5) * screenShake;
+        let dy = (Math.random() - 0.5) * screenShake;
+        ctx.translate(dx, dy); 
+        screenShake *= 0.85; 
+        if (screenShake < 0.5) screenShake = 0;
+    }
+
+    // 画背景
+    ctx.fillStyle = '#050510';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = '#00ffff';
+    ctx.strokeStyle = '#00ffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(canvas.width, groundY);
+    ctx.stroke();
+
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < 6; i++) {
+        let y = groundY + Math.pow(i, 1.8) * 4; 
+        if (y < canvas.height) {
+            ctx.moveTo(0, y);
+            ctx.lineTo(canvas.width, y);
+        }
+    }
+    let cx = canvas.width / 2;
+    for (let i = -15; i <= 15; i++) {
+        ctx.moveTo(cx + i * 35, groundY);
+        ctx.lineTo(cx + i * 150, canvas.height);
+    }
+    ctx.stroke();
+
+    if (!gameOver) {
+        frameCount++;
+        spawnEnemy();
+        player.update();
+        enemies.forEach(enemy => enemy.update());
+        particles.forEach(p => p.update());
+        particles = particles.filter(p => p.life > 0);
+    }
+
+    ctx.globalCompositeOperation = 'lighter'; 
+    particles.forEach(p => p.draw(ctx));
+    ctx.globalCompositeOperation = 'source-over'; 
+
+    enemies.forEach(enemy => enemy.draw(ctx));
+    player.draw(ctx);
+
+    if (screenShake > 0) {
+        ctx.restore();
+    }
+
+    // UI
+    ctx.fillStyle = '#00ffff';
+    ctx.shadowBlur = 5;
+    ctx.shadowColor = '#00ffff';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`SYSTEM SCORE: ${score}`, 20, 30);
+    
+    if (player.comboStep > 0 && player.comboWindow > 0) {
+        ctx.fillStyle = player.comboStep === 4 ? '#ff0055' : '#00ffff';
+        ctx.font = 'bold 24px sans-serif';
+        let shakeOffset = screenShake > 5 ? (Math.random()-0.5)*5 : 0;
+        ctx.fillText(`${player.comboStep} HIT COMBO!`, player.x - 45 + shakeOffset, player.y - 120 + shakeOffset);
+    }
+    
+    ctx.font = '15px sans-serif';
+    // 隐藏 L 键的冷却显示（因为它是无CD的），只显示 K 和 U
+    let kReady = player.cooldowns.K <= 0 ? 'READY' : `${(player.cooldowns.K/60).toFixed(1)}s`;
+    let uReady = player.cooldowns.U <= 0 ? 'READY' : `${(player.cooldowns.U/60).toFixed(1)}s`;
+    ctx.fillText(`[K] DASH STRIKE: ${kReady}`, 20, 60);
+    ctx.fillText(`[U] BURST STORM: ${uReady}`, 20, 85);
+    ctx.shadowBlur = 0;
+
+    if (gameOver) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = '#ff0055';
+        ctx.fillStyle = '#ff0055';
+        ctx.font = 'bold 50px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('SYSTEM FAILURE', canvas.width / 2, canvas.height / 2 - 20);
+        
+        ctx.shadowColor = '#00ffff';
+        ctx.fillStyle = '#00ffff';
+        ctx.font = '20px sans-serif';
+        ctx.fillText(`FINAL SCORE: ${score}`, canvas.width / 2, canvas.height / 2 + 30);
+        
+        ctx.font = '16px sans-serif';
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#aaa';
+        ctx.fillText('PRESS J, K, L OR U TO REBOOT', canvas.width / 2, canvas.height / 2 + 70);
+    }
+}
+
+requestAnimationFrame((timestamp) => {
+    lastTime = timestamp;
+    gameLoop(timestamp);
+});
+</script>
+</body>
+</html>
